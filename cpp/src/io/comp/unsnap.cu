@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020, NVIDIA CORPORATION.
+ * Copyright (c) 2018-2021, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,16 +28,6 @@ constexpr int32_t batch_size    = (1 << 5);
 constexpr int32_t batch_count   = (1 << 2);
 constexpr int32_t prefetch_size = (1 << 9);  // 512B, in 32B chunks
 constexpr bool log_cyclecount   = false;
-
-void __device__ busy_wait(size_t cycles)
-{
-  clock_t start = clock();
-  for (;;) {
-    clock_t const now     = clock();
-    clock_t const elapsed = now > start ? now - start : now + (0xffffffff - start);
-    if (elapsed >= cycles) return;
-  }
-}
 
 /**
  * @brief Describes a single LZ77 symbol (single entry in batch)

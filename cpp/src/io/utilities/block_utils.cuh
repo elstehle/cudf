@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2021, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,16 @@
 
 namespace cudf {
 namespace io {
+
+inline __device__ void busy_wait(size_t cycles)
+{
+  clock_t start = clock();
+  for (;;) {
+    clock_t const now     = clock();
+    clock_t const elapsed = now > start ? now - start : now + (0xffffffff - start);
+    if (elapsed >= cycles) return;
+  }
+}
 
 template <typename T>
 inline __device__ T shuffle(T var, int lane = 0)
