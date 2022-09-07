@@ -16,6 +16,8 @@
 
 #include "nested_json.hpp"
 
+#include <cudf_test/io_metadata_utilities.hpp>
+
 #include <io/fst/logical_stack.cuh>
 #include <io/fst/lookup_tables.cuh>
 #include <io/utilities/hostdevice_vector.hpp>
@@ -1389,6 +1391,10 @@ void make_json_column(json_column& root_column,
              token == token_t::ValueBegin) {
       // Verify that this token has the right successor to build a correct (being, end) token pair
       CUDF_EXPECTS((offset + 1) < tokens.size(), "Invalid JSON token sequence");
+      if ((offset + 1) >= tokens.size())
+        std::cout << "Problem at: token#" << offset
+                  << ", offset: " << get_token_index(tokens[offset], token_indices_gpu[offset])
+                  << "\n";
       CUDF_EXPECTS(tokens[offset + 1] == end_of_partner(token), "Invalid JSON token sequence");
 
       // The offset to the first symbol from the JSON input associated with the current token
@@ -1525,7 +1531,8 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
       if (schema.has_value()) {
         std::cout << "-> explicit type: "
                   << (schema.has_value() ? std::to_string(static_cast<int>(schema->type.id()))
-                                         : "n/a");
+                                         : "n/a")
+                  << "\n";
         target_type = schema.value().type;
       }
       // Infer column type, if we don't have an explicit type for it
@@ -1536,6 +1543,8 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
                                                          col_size,
                                                          (col_size - json_col.valid_count),
                                                          stream);
+        std::cout << "-> inferred type: "
+                  << (true ? std::to_string(static_cast<int>(target_type.id())) : "n/a") << "\n";
       }
 
       // Convert strings to the inferred data type
@@ -1548,11 +1557,13 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
                                                                   mr);
 
       // Reset nullable if we do not have nulls
-      if (target_type.id() == type_id::STRING and col->null_count() == 0) {
-        col->set_null_mask({});
+      if (target_type.id() == type_id::STRING) {
+        if (col->null_count() == 0) { col->set_null_mask({}); }
+        return {std::move(col), {{"offsets"}, {"chars"}}};
+      } else {
+        return {std::move(col), {}};
       }
 
-      return {std::move(col), {{"offsets"}, {"chars"}}};
       break;
     }
     case json_col_t::StructColumn: {
@@ -1561,6 +1572,7 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
       size_type num_rows{json_col.current_offset};
       // Create children columns
       for (auto const& col_name : json_col.column_order) {
+        std::cout << "Child col '" << col_name << "'\n";
         auto const& col = json_col.child_columns.find(col_name);
         column_names.emplace_back(col->first);
         auto const& child_col      = col->second;
@@ -1614,6 +1626,44 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
   return {};
 }
 
+std::string pad(uint32_t indent = 0)
+{
+  std::string pad{};
+  if (indent > 0) pad.insert(pad.begin(), indent, ' ');
+  return pad;
+}
+
+void print_metadata(std::vector<std::unique_ptr<column>> const& cols,
+                    cudf::io::table_metadata lhs_meta)
+{
+  std::function<void(column const&, cudf::io::column_name_info, int)> compare_names =
+    [&](column const& col, cudf::io::column_name_info lhs, int indent) {
+      std::cout << pad(indent) << "->" << lhs.name << "(col.num_children: " << col.num_children()
+                << " / schema.children: " << lhs.children.size() << ")"
+                << "\n";
+
+      for (size_t i = 0; i < lhs.children.size(); ++i) {
+        if (i >= static_cast<size_t>(col.num_children())) {
+          std::cout << i << "/" << col.num_children() << "\n";
+          for (size_t j = i; j < lhs.children.size(); ++j) {
+            std::cout << "schema:> " << lhs.children[j].name << "\n";
+          }
+          break;
+        }
+        compare_names(col.child(i), lhs.children[i], indent + 2);
+      }
+    };
+
+  // Recurse for each column making sure their names and descendants match
+  for (size_t i = 0; i < lhs_meta.schema_info.size(); ++i) {
+    if (i >= cols.size()) {
+      std::cout << i << "/" << cols.size() << "\n";
+      break;
+    }
+    compare_names(*cols[i], lhs_meta.schema_info[i], 0);
+  }
+}
+
 table_with_metadata parse_nested_json(host_span<SymbolT const> input,
                                       cudf::io::json_reader_options const& options,
                                       rmm::cuda_stream_view stream,
@@ -1643,12 +1693,11 @@ table_with_metadata parse_nested_json(host_span<SymbolT const> input,
   constexpr bool include_quote_chars = true;
 
   // We initialize the very root node and root column, which represent the JSON document being
-  // parsed. That root node is a list node and that root column is a list column. The column has the
-  // root node as its only row. The values parsed from the JSON input will be treated as follows:
-  // (1) For JSON lines: we expect to find a list of JSON values that all
-  // will be inserted into this root list column. (2) For regular JSON: we expect to have only a
-  // single value (list, struct, string, number, literal) that will be inserted into this root
-  // column.
+  // parsed. That root node is a list node and that root column is a list column. The column has
+  // the root node as its only row. The values parsed from the JSON input will be treated as
+  // follows: (1) For JSON lines: we expect to find a list of JSON values that all will be
+  // inserted into this root list column. (2) For regular JSON: we expect to have only a single
+  // value (list, struct, string, number, literal) that will be inserted into this root column.
   root_column.append_row(
     row_offset_zero, json_col_t::ListColumn, token_begin_offset_zero, token_end_offset_zero, 1);
 
@@ -1725,8 +1774,10 @@ table_with_metadata parse_nested_json(host_span<SymbolT const> input,
     column_index++;
   }
 
-  return table_with_metadata{std::make_unique<table>(std::move(out_columns)),
-                             {{}, out_column_names}};
+  print_metadata(out_columns, {{}, out_column_names});
+  auto table_ =
+    table_with_metadata{std::make_unique<table>(std::move(out_columns)), {{}, out_column_names}};
+  return table_;
 }
 
 }  // namespace detail
